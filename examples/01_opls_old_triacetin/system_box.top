@@ -1,0 +1,13 @@
+;
+
+#include "oplsaa.ff/forcefield.itp"
+#include "triacetin_org.itp"
+
+
+[ system ]
+; Name
+800 Glicerol TriAcetate
+
+[ molecules ]
+; Compound        nmol
+GTA          800
