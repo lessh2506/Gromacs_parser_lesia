@@ -1,0 +1,5 @@
+fn_ndx = 'ecla_voronoi.ndx'
+fn_xtc = '/datas1/murzyn/P-01/ecla-86b2/cat/ecla-86b2.part*.xtc'
+first = 600000
+last = 610000
+verbose = 1

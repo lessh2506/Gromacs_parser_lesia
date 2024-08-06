@@ -1,0 +1,302 @@
+#!/usr/bin/env python
+
+# http://www-pord.ucsd.edu/~cjiang/python.html
+
+import re, os.path as OP, binascii, marshal
+from Scientific.IO import NetCDF
+import numpy as np, time as TIME
+import scipy.integrate as spitg
+
+k_boltzmann =  1.3806488e-23 # m2 kg s-2 K-1
+
+# http://www.physics.ohio-state.edu/~ntg/780/
+# M. Hjorth-Jensen's 2011 notes on "Computational Physics"
+# numerical integration
+
+# http://stackoverflow.com/questions/16044491/statistical-scaling-of-autocorrelation-using-numpy-fft
+def linear_acf(data):
+    # http://stackoverflow.com/questions/643699/how-can-i-use-numpy-correlate-to-do-autocorrelation
+    r = np.correlate(data, data, mode='full')
+    return r[r.size/2:]
+
+def fft_acf(series, padding=1):
+    """nMoldyn"""
+    if padding:
+        n = 1
+        while n < 2*len(series):
+            n = n*2    
+    else: n = 2*len(series)
+    FFTSeries = np.fft.fft(series,n,0)
+    FFTSeries = FFTSeries*np.conjugate(FFTSeries)
+    FFTSeries = np.fft.ifft(FFTSeries,len(FFTSeries),0)
+    return FFTSeries.real[:len(series)]
+
+class XVGFile2NetCDF:
+
+    __re_pat_legend = re.compile('^@ s(\d+) legend "(.+)"')
+    __str_pat_number = '(-?\d+\.\d+e?-?\d*)'
+    __re_pat_data = re.compile('^\s*(\d+\.\d+)\s+' + __str_pat_number)
+
+    def __init__(self, piecewise=True, **settings):
+        # 'delta_time in settings'
+        # first_time = 100000 
+        # block_size = 1000
+        self.piecewise = piecewise
+        self.blocksize = 1000
+        self.time_step = 0.001
+        self.verbose = False
+
+    def __call__(self, filename):
+        fxvg = open(filename, 'r')
+        if not self.piecewise:
+            # np.loadtxt
+            self.data = fxvg.read()
+        data = {}
+        for line in fxvg:
+            match = re.match(self.__re_pat_legend, line)
+            if not match: 
+                match = re.match(self.__re_pat_data, line)
+                if match: break
+                else: continue
+            setnum, setname = match.groups()
+            data[setname] = int(setnum)
+        #
+        if not data or not line: return
+        if self.verbose: print data.keys()
+        nc_filename = ''.join(filename.split('.')[:-1]) + '.nc'
+        assert not OP.lexists(nc_filename)
+        nc = NetCDF.NetCDFFile(nc_filename, 'w')
+        nc.createDimension('step', None)
+        nc.createDimension('set', len(data))
+        nc.createDimension('blocksize', self.blocksize)
+        dtype = 'f' # 'd' ?
+        ncdata   = nc.createVariable('data',dtype,('step','set','blocksize'))
+        nc.names = binascii.b2a_base64(marshal.dumps(data))
+        # marshal.loads(binascii.a2b_base64(nc.names))
+        # time_step =
+        # start_time =
+
+        block = []
+        ncstep = 0
+        fields = map(float, line.split())
+        nc.time_step = self.time_step
+        #nc.start_time = fields[0]
+        while fields:
+            block.append(fields[1:])
+            if self.verbose: print fields[0]
+            if len(block) == self.blocksize:
+                ncdata[ncstep] = np.array(block).T.astype(dtype)
+                block = []
+                ncstep += 1
+                nc.flush()
+                print ncstep, 'blocks written'
+            try: line = next(fxvg)
+            except StopIteration: 
+                print 'no more lines to read'
+                break
+            fields = map(float, line.split())
+        # write remaining data
+
+        if block:
+            print len(block), 'data in block found'
+            if len(block) > 0.8*self.blocksize:
+                ncdata[ncstep] = np.array(block).astype(dtype)
+        #
+        nc.close()
+        fxvg.close()
+
+class Units:
+    bar = 1e-5   # to Pascal
+    ps  = 1e12   # to s
+    ns  = 1e9    #
+    fs  = 1e15   #
+    nm  = 1e9    # to m
+
+class PressureTensor:
+
+    def __init__(self):
+        self.nc = None
+
+    def read(self, nc_filename):
+        self.nc = NetCDF.NetCDFFile(nc_filename)
+        self.names = marshal.loads(binascii.a2b_base64(self.nc.names))
+        
+    def close(self):
+        assert self.nc is not None
+        self.nc.close()
+
+    def getShearViscosity(self, mode='xy', verbose=10, 
+                          out_prefix='gk', first=None, last=None,
+                          skip=None, shift=None, span=None,
+                          integral_limit=None, step=None, 
+                          volume=None):
+        essential = [first, last, skip, span, shift, integral_limit,
+                     step, volume]
+        assert None not in essential, ','.join(map(str, essential))
+        volume = 4.248**3 / Units.nm**3   # pdc-25vk2
+        T = 298.15
+        VkT = volume/(k_boltzmann*T) 
+        # 
+        mode = mode.lower()
+        assert mode in ['xx_yy', 'yy_zz', 'xy', 'xz', 'yz']
+	if mode == 'xx_yy':
+            print '(Pres-XX - Pres-YY) / 2.'
+            pxx = self.nc.variables['data'][:,self.names['Pres-XX']] / Units.bar
+            pyy = self.nc.variables['data'][:,self.names['Pres-YY']] / Units.bar
+
+            pxx = np.concatenate(pxx) # flat data series
+            pyy = np.concatenate(pyy) # flat data series
+            full = (pxx - pyy) / 2.
+            dat_fnm = '%s-100ns-XXYY.dat' % out_prefix
+        elif mode == 'yy_zz':
+            print '(Pres-YY - Pres-ZZ) / 2.'
+            pzz = self.nc.variables['data'][:,self.names['Pres-ZZ']] / Units.bar
+            pyy = self.nc.variables['data'][:,self.names['Pres-YY']] / Units.bar
+
+            pzz = np.concatenate(pzz) # flat data series
+            pyy = np.concatenate(pyy) # flat data series
+            full = (pyy - pzz) / 2.
+            dat_fnm = '%s-100ns-YYZZ.dat' % out_prefix
+        elif mode == 'xy':
+            print 'Pres-XY'
+            pxy = self.nc.variables['data'][:,self.names['Pres-XY']] / Units.bar
+            full = np.concatenate(pxy) # flat data series
+            dat_fnm = '%s-100ns-XY.dat' % out_prefix
+        elif mode == 'xz':
+            print 'Pres-XZ'
+            pxz = self.nc.variables['data'][:,self.names['Pres-XZ']] / Units.bar
+            full = np.concatenate(pxz) # flat data series
+            dat_fnm = '%s-100ns-XZ.dat' % out_prefix
+        elif mode == 'yz':
+            print 'Pres-YZ'
+            pyz = self.nc.variables['data'][:,self.names['Pres-YZ']] / Units.bar
+            full = np.concatenate(pyz) # flat data series
+            dat_fnm = '%s-100ns-YZ.dat' % out_prefix
+
+        racf = None # running integral
+
+        # step = 0.01 # usually 0.001 stored in nc.time_step; this is
+        #             # *not* MD integrator time step, it is time
+        #             # between dumps of pressure tensor
+        # span = 500.0 # in ps; calculate 1000 ps ACF
+        # convert time in picoseconds to integer list indices
+        span = int(span / step) # last array element to take
+
+        # # has to be integer to avoid fractional skipping moves since
+        # # step is set and constant
+        # skip = 2     # take every nth frame; if None: take every
+        #              # frame, HAS TO BE > 0 and integer !!!
+        #              # 10 with step = 0.01 corresponds to sampling data
+        #              # with 0.1 ps
+        iave = 0
+
+        # from time in picoseconds (both: first and step) to list indices
+        first = int( first / step ) 
+        last = int( last / step ) - span + 1
+        shape = self.nc.variables['data'].shape
+        assert (last+span-1) <= shape[0]*shape[-1]
+
+        #shift = 0.1  # every 0.1 ps ; time span between ACF windows
+        shift = int(shift / step) # last array element to take
+
+        #integral_limit = 200.0 # in picoseconds
+        integral_limit = int(integral_limit / step / skip) # last array element
+                                                           # to take
+
+        # list of integers, array indices 
+        myrange = range(first,last,shift)
+        nano = Units.ps / Units.ns
+        print '-'*45
+        print '# starting points       : ', len(myrange)
+        print 'Starting time first [ns]: ', first*step / nano
+        print 'Starting time last  [ns]: ', last*step / nano
+        print 'Time period used    [ns]: ', 
+        print (myrange[-1] - myrange[0] + span)*step / nano
+        print 'Sampling time used  [ps]: ', skip*step
+        print 'Sampling time orig. [ps]: ', step
+        print 'ACF window length   [ns]: ', span*step / nano
+        print 'ACF integral limit  [ns]: ', integral_limit*step*skip / nano
+        print 'ACF window shift    [ps]: ', shift*step
+        print '-'*45
+        print 'ACF length to integral limit ratio: ', 
+        print '%.3f' % (float(len(fft_acf(full[0:span:skip])))/integral_limit,)
+        print '-'*45
+        prev_progress = -1
+        for i in myrange:
+            # acf from *raw* off-diagonal elements or
+            # (after Yuh&Hummer) *deviation of an off-diagonal
+            # element of the instantaneous pressure tensor
+            # from the average (zero in an infinitelly long run)
+            # KM: average from [i:i+span] series or *full*?
+            pxy_acf = fft_acf(full[i:i+span:skip])
+            if racf is None: racf = pxy_acf
+            else: racf += pxy_acf
+            iave += 1
+            progress = int( float(iave)/len(myrange)*100 )
+            if prev_progress < progress and \
+                    (progress-prev_progress) > verbose:
+                print progress, TIME.ctime(), 
+                print '%12.4e (at: %g)' % \
+                    (VkT * np.trapz((racf/iave)[:integral_limit], 
+                                    dx=step*skip/Units.ps) / (span/skip), 
+                     integral_limit*step*skip)
+                prev_progress = progress
+        pxy_acf = racf/iave
+        cumint = np.concatenate([[0], spitg.cumtrapz(pxy_acf, 
+                                                     dx=step*skip/Units.ps) \
+                                     / (span/skip) * VkT ])
+        data = np.array([np.arange(0,len(racf)*step*skip,step*skip),
+                         pxy_acf/pxy_acf[0], cumint]).T
+        np.savetxt(dat_fnm, data)
+        print '-'*45
+        print 'ACF norm factor (i.e. ACF(0)): ', pxy_acf[0]
+	#print np.add.reduce(pxy_acf * step * skip / Units.ps)
+	print 'ACF integral (%g): %g' % (integral_limit*step*skip, 
+                                       np.trapz(pxy_acf, dx=step*skip/Units.ps))
+        print 'Viscosity V k-1 T-1 term: ', VkT
+        # use without normalization, i.e. NO pxy_acf /= pxy_acf[0]
+        # integration: x = np.linspace(0,np.pi/2)
+        # dt = (x[:-1] - x[1:])[0]
+        # sum(np.sin(x)*dt) # 1.0?
+
+        # span/skip is the number of data points used in calculations
+        # step*skip is *time* between consecutive points in data series
+
+        # notice here that we're taking the *whole* ACF integral
+        print 'Viscosity at inf limit (%g): %12.4e' % (len(pxy_acf)*step*skip,
+                VkT * np.trapz(pxy_acf, dx=step*skip/Units.ps) / (span/skip)) 
+                # in Pa s
+
+# http://www.math.montana.edu/frankw/ccp/units/integral/body.htm
+# http://www.unitconversion.org/unit_converter/viscosity-dynamic.html
+# https://alexandria.astro.cf.ac.uk/Joomla-python/index.php/week6-num-int
+
+if __name__ == '__main__':
+
+    from modysa.io import settings as STG
+    import sys
+
+    input_fnm = sys.argv[1]
+    if input_fnm[-4:] == '.xvg': # convert XVG to netCDF file
+        fxvg = XVGFile2NetCDF()
+        fxvg(input_fnm)
+    else:
+        infile = STG.InputFile()
+        infile.load(input_fnm)
+        # first, last in nanoseconds
+        fields = infile.entries(fn_nc=str, first=float , last=float,
+                                out_prefix = str, skip=int, span=float, 
+                                shift=float, integral_limit = float, 
+                                mode = str, verbose = int, step = float,
+                                volume = float)
+        infile.show(fields)
+        pt = PressureTensor()
+        pt.read(fields['fn_nc'])
+        for mode in fields['mode'].split():
+            pt.getShearViscosity(mode=mode, out_prefix=fields['out_prefix'],
+                                 first=fields['first'], last=fields['last'],
+                                 step=fields['step'], skip=fields['skip'],
+                                 span=fields['span'], volume=fields['volume'],
+                                 integral_limit=fields['integral_limit'],
+                                 shift=fields['shift'])
+        pt.close()

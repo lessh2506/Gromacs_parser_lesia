@@ -1,0 +1,357 @@
+#!/usr/bin/env python
+
+from modysa.io import index as NDX
+import modysa.misc as M
+from modysa.io import trajectory as T
+from modysa import statistics as S
+from modysa.core import configuration as C
+
+import numpy as np
+import copy, re
+import os.path as OP
+
+from scipy import spatial as SP
+
+bX, bY = 94.332,   86.307
+
+# http://www.gamedev.net/topic/345149-projecting-a-vector-on-a-plane/
+# http://en.wikipedia.org/wiki/3D_projection
+# http://mail.scipy.org/pipermail/scipy-user/2009-May/021309.html
+
+class PlanePoints:
+
+    def set(self, xyz, bX, bY):
+        self.data = xyz
+        # scalars now, but we need vectors (G.DistanceVector?)
+        self.bX = bX
+        self.bY = bY
+
+    def load(self, fnm, bX=None, bY=None):
+        self.data = np.loadtxt(fnm)
+        self.bX = bX
+        self.bY = bY
+        
+    def wrap(self):
+        # put in (0,bX), (0,bY) ranges
+        # scalars now, but we need vectors (G.DistanceVector?)
+        assert None not in [self.bX, self.bY]
+        d = self.data
+        d[:,0] = np.where(d[:,0]<0,d[:,0]+self.bX,d[:,0])
+        d[:,1] = np.where(d[:,1]<0,d[:,1]+self.bY,d[:,1])
+        d[:,0] = np.where(d[:,0]>self.bX,d[:,0]-self.bX,d[:,0])
+        d[:,1] = np.where(d[:,1]>self.bY,d[:,1]-self.bY,d[:,1])
+        self.data = d
+
+    def extend(self, dX=20, dY=20):
+        # append mirror images at the end of self.data array
+        # both smaller and larger
+        # dX, dY are scalars now, but we need vectors (G.DistanceVector?)
+        # how about calculate scaling factors, e.g. Xvector (bX) has 7.5 nm
+        # just rescale it by multiplying by (9.5/7.5)
+        self.wrap()
+        c = copy.copy(self.data)
+        cxm = np.flatnonzero(c[:,0] < dX)
+        cym = np.flatnonzero(c[:,1] < dY)
+        uX = self.bX - dX
+        uY = self.bY - dY
+        cxp = np.flatnonzero(c[:,0] > uX)
+        cyp = np.flatnonzero(c[:,1] > uY)
+        # appends edge bands
+        for items, shift, which in [ (cxm, self.bX, 0), (cym, self.bY, 1), 
+                                     (cxp, -self.bX, 0), (cyp, -self.bY, 1) ]:
+            band = np.take(self.data, items, axis=0)
+            band[:,which] += shift
+            c = np.concatenate( (c,band), axis=0)
+        # appends corner bands
+        for ix, iy, shiftX, shiftY in [ (cxm, cym, self.bX, self.bY),
+                                        (cxm, cyp, self.bX, -self.bY),
+                                        (cxp, cym, -self.bX, self.bY),
+                                        (cxp, cyp, -self.bX, -self.bY) ]:
+            which = tuple( set(ix).intersection(iy) )
+            band = np.take(self.data, which, axis=0)
+            band[:,0] += shiftX
+            band[:,1] += shiftY
+            c = np.concatenate( (c,band), axis=0)
+        # (-1, 1), (-1, -1), (1,-1), (1,1)
+        return c
+
+# calculate delaunay, voronoi, and surface area
+def simpoly(x,y):
+  """
+  A function that calculates the area of a 2-D simple polygon (no matter concave or convex)
+  Must name the vertices in sequence (i.e., clockwise or counterclockwise)
+  Square root input arguments are not supported
+  Formula used: http://en.wikipedia.org/wiki/Polygon#Area_and_centroid
+  Definition of "simply polygon": http://en.wikipedia.org/wiki/Simple_polygon
+
+  Input x: x-axis coordinates of vertex array
+        y: y-axis coordinates of vertex array
+  Output: polygon area
+ """
+
+  ind_arr = np.arange(len(x))-1  # for indexing convenience
+  s = 0
+  for ii in ind_arr:
+    s = s + (x[ii]*y[ii+1] - x[ii+1]*y[ii])
+  return abs(s)*0.5
+
+class Voronoi:
+
+    def __init__(self, points):
+        tri = SP.Delaunay(points)
+        p = tri.points[tri.vertices]
+        # Triangle vertices
+        A = p[:,0,:].T
+        B = p[:,1,:].T
+        C = p[:,2,:].T
+        # See http://en.wikipedia.org/wiki/Circumscribed_circle#Circumscribed_circles_of_triangles
+        # The following is just a direct transcription of the formula there
+        a = A - C
+        b = B - C
+        def dot2(u, v):
+            return u[0]*v[0] + u[1]*v[1]
+        def cross2(u, v, w):
+            """u x (v x w)"""
+            return dot2(u, w)*v - dot2(u, v)*w
+        def ncross2(u, v):
+            """|| u x v ||^2"""
+            return sq2(a)*sq2(b) - dot2(a,b)**2
+        def sq2(u):
+            return dot2(u, u)
+        #
+        # circumcenter p0
+        cc = cross2(sq2(a) * b - sq2(b) * a, a, b) / (2*ncross2(a, b)) + C
+        # Grab the Voronoi edges
+        vc = cc[:,tri.neighbors]
+        vc[:,tri.neighbors == -1] = np.nan # edges at infinity, plotting those would need more work...
+        #
+        lines = []
+        lines.extend(zip(cc.T, vc[:,:,0].T))
+        lines.extend(zip(cc.T, vc[:,:,1].T))
+        lines.extend(zip(cc.T, vc[:,:,2].T))
+        self.lines = lines
+        self.cc = cc
+        self.vc = vc
+        self.p = p
+        self.tri = tri
+
+    def neighbors(self):
+        dist = np.add.reduce( (self.tri.points[:,np.newaxis] - self.cc.T)**2, 
+                              -1)**.5
+        # find three nearest neighbors of each voronoi vertex
+        m2min = np.argsort(dist,0)[:3].T
+        result = {}
+        for i in range(m2min.shape[0]):
+            # one voronoi vertex, one delaunay triangle
+            v1, v2, v3 = m2min[i]
+            if result.has_key(v1): result[v1].append(i)
+            else: result[v1] = [i]
+            if result.has_key(v2): result[v2].append(i)
+            else: result[v2] = [i]
+            if result.has_key(v3): result[v3].append(i)
+            else: result[v3] = [i]
+        return result
+
+    def surface(self, selected=None, last=None):
+        neighbors = self.neighbors()
+        if selected: which = set(selected)
+        else: which = range(len(neighbors))
+        which = which[:last]
+        result = []
+        for i in which:
+            n = neighbors[i] 
+            cx = self.tri.points[i] # center point of voronoi polyhedra
+            vx = np.take(self.cc.T, n, axis=0) # vertex points
+            # http://stackoverflow.com/questions/1709283/
+            # how-can-i-sort-a-coordinate-list-for-a-rectangle-counterclockwise
+            r = vx - cx
+            s = (np.arctan2(r[:,1],r[:,0]) + 2*np.pi) % (2*np.pi)
+            sv = np.take(vx, np.argsort(s), axis=0) # sorted vertices
+            result.append( simpoly( *sv.T ) )
+        return result
+
+# # given a set of 3 nodes ids, find the area of the triangle
+# # note that triangle area is given by 1/2 * cross product of two sides of the triangle
+# def tri_area(face_nodes):
+#    v1 = array( cubit.get_nodal_coordinates(face_nodes[0]) )
+#    v2 = array( cubit.get_nodal_coordinates(face_nodes[1]) )
+#    v3 = array( cubit.get_nodal_coordinates(face_nodes[2]) )
+# #
+#    s1 = v2 - v1
+#    s2 = v3 - v1
+# #
+#    area2 = cross(s1, s2)
+#    return sqrt( vdot(area2, area2) ) *0.5
+
+class AtomCollection:
+
+    def __init__(self, atom_array):
+        pass
+
+    def centerOfMass(self, configuration):
+        pass
+
+
+def main(fn_ndx=None, fn_xtc=None, first=None, last=None,
+         hist_range=(0,2,.005), norm=(0,0,1), verbose=False):
+    assert None not in [fn_ndx, fn_xtc]
+    traj = T.Trajectory(fn_xtc)
+    traj.limit(first, last)
+    first, last = traj.first, traj.last
+    # --- print out exec settings
+    loc = locals()
+    for item in ['fn_ndx', 'fn_xtc', 'first', 'last', 'hist_range',
+                 'verbose']:
+        print '%20s :: %s' % (item, str(loc[item]))
+    # ---
+    # --- parse IndexFile
+    ndx = NDX.IndexFile()
+    ndx.read(fn_ndx)
+    # get str groups
+    # handle lists for all except _merge_ (and possibly any
+    # name matching _weight_*)
+    strGroups = set(ndx.getGroups(str))
+    strGroups.discard('_merge_')
+    for gn in strGroups: ndx.lists(gn) # handle lists/loops
+
+    allGroups = ndx.groups.keys()
+    selected_patre = re.compile('^selected_.+')
+    selected = filter( selected_patre.match, allGroups )
+    weights_patre = re.compile('^weights_.+')
+    weights = filter( weights_patre.match, allGroups )
+
+    point_sets = set(allGroups)
+    map( point_sets.discard, selected + weights + ['_merge_'])
+
+    ipoints = {}
+    # one column in index group expected
+    # each row contains either one atom or group of atoms
+    # in the latter case center-of-mass is supposed to be calculated
+    for name in point_sets:
+        # flat full=True ?
+        # FIXME: make clear what in NDX file should be flatted fully..
+        entry = M.flatten(ndx.groups[name], full=False)
+        ipoints[name] = np.array(zip(*entry)[0]) - 1
+
+    selected_patre = re.compile('selected_(.+)')
+    selected_names = M.flatten(map(selected_patre.findall, selected))
+
+    if ndx.groups.has_key('_merge_'):
+        merge = map(str.split, ndx.groups['_merge_'])
+    else: merge = []
+    named_selections = {}
+    for names in merge:
+        assert all( map(lambda s: s in selected_names, names) ), \
+            'Error: names in %s not found in named selections' % str(names)
+        data = {}
+        for n in names: 
+            data[n] = (np.array(M.flatten(ndx.groups['selected_%s' % n], 
+                                          full=False)) - 1).tolist()
+        named_selections[tuple(names)] = data
+
+    for name in selected_names:
+        named_selections[(name,)] = \
+            {name: (np.array(M.flatten(ndx.groups['selected_%s' % name], 
+                                       full=False)) - 1).tolist()}
+
+    # ---
+    # --- prepare histograms for data collection
+    hist = {}
+    bins = np.arange( *hist_range )
+    for name in named_selections.keys():
+        hist[name] = S.Histogram()
+        hist[name].set(bins=bins)
+
+    # print M.flatten(ndx.groups['selected_upper-2p'], full=False)
+    # data = M.flatten(ndx.groups['selected_upper-ecla'], full=False)
+    # print data
+    # print np.array(data).shape
+    # print hist.keys()
+
+    # ---
+    # --- loop over configurations
+    cell = C.Cell()
+    conf = None
+    pp = PlanePoints()
+    proceed = True
+
+    while proceed:
+        xyz = traj.getConfiguration()
+        cell.setFromBasisVectors(traj.getCell())
+        if conf is None: conf = C.Configuration(xyz, cell)
+        else: conf.update(xyz, cell)
+
+        for name in point_sets:
+            pts = ipoints[name]
+            data = np.take(conf.array, pts, axis=0)
+            # FIXME: 3d projection should be handled here
+            # sets of 3d points projected on a plane given by norm vector
+            # problem: how to handle non-ortogonal 2d PBC? 
+            #
+            # just for now: let's assume all points are in XY plane
+            # and the box is rectangular
+            pp.set(data[:,:2], cell.vectors[0,0], cell.vectors[1,1])
+            pp.wrap()
+            c = pp.extend(dX=2, dY=2) # extend by 2 nm
+            v = Voronoi(c)
+            # Voronoi is made for the whole collection of points
+            # calculation of polyhedra surface is done for selected points only
+
+            npts = pts.shape[0]
+            sa = v.surface( last=npts )
+            # calculate surface area once, then pick what needed
+            for entry in hist.keys():
+                selected = named_selections[entry]
+                for item in entry:
+                    # named selection should start with 
+                    # name of the current points set
+                    if not item.startswith(name): continue
+                    data = [ sum(np.take(sa, pick)) for pick in selected[item]]
+                    hist[entry].addData(data)
+                    # FIXME '%s_%s-S.dat' write time series data
+        if verbose: print traj.getTime(), entry, np.mean(data)
+
+        proceed = traj.readFrame()
+    # ---
+    traj.close()
+    # --- save histograms
+    basename = fn_ndx[:fn_ndx.rfind('.ndx')]
+    for name in hist.keys():
+        out_fnm = '%s_%s-H.dat' % (basename, '_'.join(name))
+        print out_fnm
+        data = hist[name](1.0).tolist() # normalize area under curve
+        np.savetxt(out_fnm, zip(bins, data), fmt='%10.5f %12.5e')
+    # ---
+    # END
+        
+# http://pygeo.sourceforge.net/docs/Overview.html
+
+if __name__ == '__main__':
+
+    from modysa.io import settings as STG
+    import sys
+
+    infile = STG.InputFile()
+    infile.load(sys.argv[1])
+    
+    fields = infile.entries(fn_ndx=str, fn_xtc=str, first=float, last=float,
+                            hist_range=tuple, fn_out=str, verbose=int)
+    infile.show(fields)
+    if fields: main(**fields)
+
+    # pp = PlanePoints()
+    # pp.load('/tmp/upper.dat',bX,bY)
+    # c = config.extend()
+    # np.savetxt('wrapped.dat',c,fmt='%10.3f  %10.3f')
+    # v = Voronoi(c)
+    # sa = v.surface( range(160) )
+    # V.np.savetxt('/tmp/sa.dat', sa)
+
+# histogram
+# gnuplot> binwidth = 1
+# gnuplot> bin(x,width)=width*floor(x/width)
+# gnuplot> plot '/tmp/s.dat' using (bin($1,binwidth)):(1.0) smooth freq with boxes
+
+# point labels: label x y
+# plot '/tmp/t.dat' u ($2+3):($3+3):1 w labels
+

@@ -1,0 +1,10 @@
+*~
+*.pyc
+build/*
+backup/*
+*.so
+*.nc
+modysa/linux2/*
+notes/*
+readme
+sandbox/*
