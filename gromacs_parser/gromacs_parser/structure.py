@@ -28,49 +28,47 @@ class Atom:
 
 
 class Atoms:
-    def __init__(self, atoms_list, structure):
-        self.atoms_list=atoms_list
+    def __init__(self, atoms, structure):
+        self.atoms=atoms
         self.structure=structure
 
+    @property
+    def atom_length(self):
+        return len(self.atoms)
+    
+    def __iter__(self):
+        return iter(self.atoms)
+    
+    def pdb_text(self):
+        pdb_lines = []
+        for atom in self.atoms:
+            pdb_lines.append(f"ATOM  {atom.atom_number:5d} {atom.atom_name:>4s} {atom.residue_name:>3s} {atom.chain_id} {atom.residue_number:4d}    {atom.x:8.3f}{atom.y:8.3f}{atom.z:8.3f}{atom.occupancy if atom.occupancy else 1.00:6.2f}{atom.temp_factor if atom.temp_factor else 0.00:6.2f}")
+        return "\n".join(pdb_lines)
+    
+    def write(self, file_path):
+        self.structure.write(file_path, self)
+
+    def show(self, cartoon=True, sticks=False, highlight_atoms=None): 
+        import nglview as nv
+        # Create a PDB format string from the atoms data
+        pdb_content=self.structure.pdb_text(self)
+
+        # Create an NGLWidget and load the PDB structure
+        view = nv.NGLWidget()
+        view.add_component(pdb_content, ext='pdb')
+        view.clear_representations()
+        if cartoon:
+            view.add_cartoon()
+        if sticks:
+            view.add_ball_and_stick()
+        if highlight_atoms:
+            view.add_ball_and_stick("sphere", selection=highlight_atoms, color="red")
 
 
-        @property
-        def atom_length(self):
-            return len(self.atoms_list)
-        
-        def __iter__(self):
-            return iter(self.atoms_list)
-        
-        def pdb_text(self):
-            pdb_lines = []
-            for atom in self.atoms_list:
-                pdb_lines.append(f"ATOM  {atom.atom_number:5d} {atom.atom_name:>4s} {atom.residue_name:>3s} {atom.chain_id} {atom.residue_number:4d}    {atom.x:8.3f}{atom.y:8.3f}{atom.z:8.3f}{atom.occupancy if atom.occupancy else 1.00:6.2f}{atom.temp_factor if atom.temp_factor else 0.00:6.2f}")
-            return "\n".join(pdb_lines)
-        
-        def write(self, file_path):
-            self.structure.write(file_path, self)
-
-        def show(self, cartoon=True, sticks=False, highlight_atoms=None): 
-            import nglview as nv
-            # Create a PDB format string from the atoms data
-            pdb_content=self.structure.pdb_text(self)
-
-            # Create an NGLWidget and load the PDB structure
-            view = nv.NGLWidget()
-            view.add_component(pdb_content, ext='pdb')
-            view.clear_representations()
-            if cartoon:
-                view.add_cartoon()
-            if sticks:
-                view.add_ball_and_stick()
-            if highlight_atoms:
-                view.add_ball_and_stick("sphere", selection=highlight_atoms, color="red")
-
-
-            # Display the widget
-            return view
-        
-        def __filter_by_residue(self, residue_name):
+        # Display the widget
+        return view
+    
+    def __filter_by_residue(self, residue_name):
             return Atoms([atom for atom in self.atoms_list if atom.residue_name==residue_name], self.structure)
         
 
@@ -83,7 +81,7 @@ class StructureRead:
         else: ValueError("Please provide a file path")	
 
 
-        def pdb_reader(self, file_path):
+    def pdb_reader(self, file_path):
             with open(file_path, 'r') as file:
                 lines = file.readlines()
                 atoms = [] 
@@ -113,3 +111,4 @@ class StructureRead:
                             continue
                         atom = Atom(residue_number, residue_name, atom_name, atom_number, x,y,z,None,None,None, self,chain_id=chain_id, PDB_record=record_name, occupancy=occupancy, temp_factor=temp_factor)
                         atoms.append(atom)
+                return atoms
