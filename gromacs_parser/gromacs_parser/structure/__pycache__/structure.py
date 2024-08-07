@@ -26,7 +26,7 @@ class Atom:
 
 
 class Atoms:
-    def __init__(self, atoms_list, structure, reassign_structure_to_atoms=False):
+    def __init__(self, atoms_list, structure):
         self.atoms_list=atoms_list
         self.structure=structure
 
@@ -38,6 +38,12 @@ class Atoms:
         
         def __iter__(self):
             return iter(self.atoms_list)
+        
+        def pdb_text(self):
+            pdb_lines = []
+            for atom in self.atoms_list:
+                pdb_lines.append(f"ATOM  {atom.atom_number:5d} {atom.atom_name:>4s} {atom.residue_name:>3s} {atom.chain_id} {atom.residue_number:4d}    {atom.x:8.3f}{atom.y:8.3f}{atom.z:8.3f}{atom.occupancy if atom.occupancy else 1.00:6.2f}{atom.temp_factor if atom.temp_factor else 0.00:6.2f}")
+            return "\n".join(pdb_lines)
         
         def write(self, file_path):
             self.structure.write(file_path, self)
