@@ -30,11 +30,6 @@ class Atoms:
         self.atoms_list=atoms_list
         self.structure=structure
 
-        #why do we need this if?
-        #if reassing structure to atoms
-        if reassign_structure_to_atoms:
-            for atom in self.atoms_list:
-                atom.structure=structure
 
 
         @property
