@@ -1,3 +1,5 @@
+import sys
+
 class Atom:
     def __init__(self, residue_number, residue_name, atom_name, atom_number, x, y, z, v_x, v_y, v_z, structure, start_terminus=None, end_terminus=None, chain_id=None, PDB_record=None, occupancy=None, temp_factor=None):
         self.residue_number = residue_number
@@ -71,3 +73,43 @@ class Atoms:
         def __filter_by_residue(self, residue_name):
             return Atoms([atom for atom in self.atoms_list if atom.residue_name==residue_name], self.structure)
         
+
+class StructureRead:
+    def __init__(self, file_path="", atoms=None):
+        super().__init__()
+        if file_path != "":
+            self.file_path = file_path
+            self.atoms = self.read()
+        else: ValueError("Please provide a file path")	
+
+
+        def pdb_reader(self, file_path):
+            with open(file_path, 'r') as file:
+                lines = file.readlines()
+                atoms = [] 
+                for line in lines:
+                    record_name = line[0:6].strip()
+
+                #coordinates ATOM and HETATM
+                    if record_name == 'ATOM' or record_name == "HETATM":
+                        atom_number = int(line[6:11].strip())
+                        atom_name = line[12:16]
+                        alt_loc = line[16].strip()
+                        residue_name = line[17:20].strip()
+                        chain_id = line[21].strip()
+                        residue_number = int(line[22:26].strip())
+                        insertion_code = line[26].strip()
+                        #devide by 10 to get nm
+                        x = float(line[30:38].strip())/10
+                        y = float(line[38:46].strip())/10
+                        z = float(line[46:54].strip())/10
+                        occupancy = float(line[54:60].strip()) if line[54:60].strip() != '' else None
+                        temp_factor = float(line[60:66].strip()) if line[60:66].strip() != '' else None
+                        segment_id = line[72:76].strip()
+                        element_symbol = line[76:78].strip()
+                        charge = line[78:80].strip()
+                        #skip alt loc, gromacs does this too as gro file format can not handle alt loc
+                        if not (alt_loc == '' or alt_loc == 'A'):
+                            continue
+                        atom = Atom(residue_number, residue_name, atom_name, atom_number, x,y,z,None,None,None, self,chain_id=chain_id, PDB_record=record_name, occupancy=occupancy, temp_factor=temp_factor)
+                        atoms.append(atom)
