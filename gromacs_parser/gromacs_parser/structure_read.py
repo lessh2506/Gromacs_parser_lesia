@@ -1,3 +1,4 @@
+import os
 class Atom:
     def __init__(self, residue_number, residue_name, atom_name, atom_number, x, y, z, v_x, v_y, v_z, structure, start_terminus=None, end_terminus=None, chain_id=None, PDB_record=None, occupancy=None, temp_factor=None):
         self.residue_number = residue_number
@@ -31,6 +32,9 @@ class Atoms:
     @property
     def atom_length(self):
         return len(self.atoms)
+    
+    def first_atom(self):
+        return self.atoms[0]
         
     def __iter__(self):
         return iter(self.atoms)
@@ -42,12 +46,20 @@ class Atoms:
         return "\n".join(pdb_lines)
         
     def write(self, file_path):
+        output_dir = os.path.dirname(file_path)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        
+
         with open(file_path, 'w') as file:
             file.write(self.pdb_text())
 
+            
     def show(self, cartoon=True, sticks=False, highlight_atoms=None): 
         import nglview as nv
         pdb_content = self.pdb_text()
+
+
 
         view = nv.NGLWidget()
         view.add_component(pdb_content, ext='pdb')
